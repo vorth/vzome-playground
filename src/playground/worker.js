@@ -18,19 +18,19 @@ self.onmessage = async (e) => {
   const { type, payload } = e.data;
   if (type !== 'RUN_SCRIPT') return;
 
-  const logs = [];
   try {
     const engine = await enginePromise;
-    const mesh = runScript(payload.code, engine, payload.input, (line) => logs.push(line));
+    const mesh = runScript(payload.code, engine, payload.input,
+      (line) => self.postMessage({ type: 'SCRIPT_LOG', payload: { line } }));
     const meshText = JSON.stringify(mesh);
     self.postMessage({
       type: 'SCRIPT_RESULT',
-      payload: { mesh: meshText, engine: engine.name, edges: mesh.edges?.length ?? 0, logs },
+      payload: { mesh: meshText, engine: engine.name, edges: mesh.edges?.length ?? 0 },
     });
   } catch (err) {
     self.postMessage({
       type: 'SCRIPT_ERROR',
-      payload: { message: err.message, stack: err.stack, logs },
+      payload: { message: err.message, stack: err.stack },
     });
   }
 };
