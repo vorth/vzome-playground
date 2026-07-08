@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+// Relay page for the sandboxed execution iframe.
+// This page runs inside <iframe sandbox="allow-scripts"> (no allow-same-origin),
+// so its JS origin is null and it cannot touch the parent page's DOM, cookies,
+// or localStorage. It owns the worker and shuttles messages in both directions.
+
+let worker = null;
+const queue = []; // messages that arrive before INIT_WORKER is processed
+
+window.addEventListener('message', (e) => {
+  if (!worker) {
+    if (e.data?.type === 'INIT_WORKER') {
+      worker = new Worker(e.data.workerUrl, { type: 'module' });
+      worker.onmessage = (we) => parent.postMessage(we.data, '*');
+      queue.forEach((msg) => worker.postMessage(msg));
+      queue.length = 0;
+    } else {
+      queue.push(e.data);
+    }
+    return;
+  }
+  worker.postMessage(e.data);
+});
+</script>
+</body>
+</html>

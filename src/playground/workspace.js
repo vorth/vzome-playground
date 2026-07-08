@@ -32,7 +32,7 @@ export function createWorkspace({ getTitle, blankStart = false } = {}) {
   let editorEl;
   let editor;
   let viewer;
-  let worker;
+  let iframe;
   let currentInput = null;
   let lastMesh = null;
   let templateXml = null;
@@ -62,11 +62,17 @@ export function createWorkspace({ getTitle, blankStart = false } = {}) {
     });
     viewer = document.querySelector('vzome-viewer'); // element ref; upgrades once its module loads
 
-    // Engine worker first so it loads in parallel — it's the long pole.
-    worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-    worker.onmessage = (e) => {
+    // Sandboxed iframe owns the worker and provides the security boundary.
+    // Messages from the iframe are forwarded here; we filter by source so
+    // unrelated postMessage traffic on window is ignored.
+    const handleMessage = (e) => {
+      if (e.source !== iframe?.contentWindow) return;
       const { type, payload } = e.data;
       if (type === 'ENGINE_READY') { setEngineReady(true); return; }
+      if (type === 'SCRIPT_LOG') {
+        setOutput(prev => prev ? prev + '\n' + payload.line : payload.line);
+        return;
+      }
       setRunning(false);
       if (type === 'SCRIPT_RESULT') {
         lastMesh = payload.mesh;
@@ -75,18 +81,41 @@ export function createWorkspace({ getTitle, blankStart = false } = {}) {
         doc.querySelector('ImportSimpleMeshJson').textContent = payload.mesh;
         viewer.src = xmlToDataUrl(new XMLSerializer().serializeToString(doc));
 
-        // The success readout used to live in the status bar; now it tails the console.
         const done = `Done — ${payload.edges} edges (engine: ${payload.engine}).`;
-        setOutput([...payload.logs, done].join('\n'));
+        setOutput(prev => prev ? prev + '\n' + done : done);
         setHasResult(true);
         setErrored(false);
       } else if (type === 'SCRIPT_ERROR') {
-        const logBlock = payload.logs.length ? payload.logs.join('\n') + '\n\n' : '';
-        setOutput(logBlock + (payload.stack || payload.message));
+        const err = payload.stack || payload.message;
+        setOutput(prev => prev ? prev + '\n\n' + err : err);
         setHasResult(false);
         setErrored(true);
       }
     };
+    window.addEventListener('message', handleMessage);
+    onCleanup(() => {
+      window.removeEventListener('message', handleMessage);
+      iframe?.remove();
+    });
+
+    // Create the sandbox iframe. On load, hand it the worker URL so it can
+    // spin up the worker itself (the worker URL must come from import.meta.url
+    // resolution in this module, not from inside the null-origin iframe).
+    iframe = document.createElement('iframe');
+    // allow-same-origin is required so the null-origin iframe can create a module
+    // worker from our origin. This is safe because user code runs only in the
+    // worker (not the iframe main thread), and workers cannot access cookies,
+    // localStorage, or the DOM regardless of origin.
+    iframe.sandbox = 'allow-scripts allow-same-origin';
+    iframe.style.display = 'none';
+    iframe.src = '/sandbox.html';
+    iframe.onload = () => {
+      iframe.contentWindow.postMessage(
+        { type: 'INIT_WORKER', workerUrl: new URL('./worker.js', import.meta.url).href },
+        '*'
+      );
+    };
+    document.body.appendChild(iframe);
 
     // The vzome-viewer web component is heavy (Three.js); load it on demand so it
     // no longer gates first paint (it was a static import). Fetch the template in
@@ -100,17 +129,17 @@ export function createWorkspace({ getTitle, blankStart = false } = {}) {
   });
 
   const run = () => {
-    if (!worker) return; // worker is created in onMount; ignore clicks before it's ready
+    if (!iframe) return; // iframe is created in onMount; ignore clicks before it's ready
     setEverRun(true); // one-shot: drop the stronger pre-run viewer grain
     setOutput('');
     setRunning(true);
     setHasResult(false);
     setErrored(false);
     lastMesh = null;
-    worker.postMessage({
-      type: 'RUN_SCRIPT',
-      payload: { code: editor.state.doc.toString(), input: currentInput },
-    });
+    iframe.contentWindow.postMessage(
+      { type: 'RUN_SCRIPT', payload: { code: editor.state.doc.toString(), input: currentInput } },
+      '*'
+    );
   };
 
   const onFileChange = async (e) => {
